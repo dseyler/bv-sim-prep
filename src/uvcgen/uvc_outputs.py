@@ -48,7 +48,8 @@ def export_valve_info(uvc, write_ch=True):
     normals : np.array
         3x4 array, each colum is a normal vector. av/mv/pv/tv.
     """
-    valves = ['av', 'mv', 'pv', 'tv']
+    # Only include valves that exist
+    valves = [v for v in ['av', 'mv', 'pv', 'tv'] if v in uvc.valve_centroids]
     centroids = []
     normals = []
     for v in valves:
@@ -115,14 +116,15 @@ def export_mappings(uvc, which, map_type='points'):
 def export_info(uvc):
     info = {}
 
-    # Valve info
-    valves = ['av', 'mv', 'pv', 'tv']
+    # Valve info - only include valves that exist
+    valves = [v for v in ['av', 'mv', 'pv', 'tv'] if v in uvc.valve_centroids]
     for v in valves:
         info[v + '_centroid'] = uvc.valve_centroids[v]
         info[v + '_normal'] = uvc.valve_normals[v]
 
-    # N3 vector
-    n3 = np.cross(info['mv_normal'], info['av_normal'])
+    # N3 vector - use AV if exists, otherwise MV
+    base_valve = 'av' if uvc.has_av else 'mv'
+    n3 = np.cross(info['mv_normal'], info[base_valve + '_normal'])
     info['lv_N3'] = n3/np.linalg.norm(n3)
     n3 = np.cross(info['tv_normal'], info['pv_normal'])
     info['rv_N3'] = n3/np.linalg.norm(n3)
@@ -143,13 +145,14 @@ def export_info(uvc):
     return info
 
 def export_cheart_inputs(uvc, which='all'):
-    # Valve normals
-    valves = ['av', 'mv', 'pv', 'tv']
+    # Valve normals - only include valves that exist
+    valves = [v for v in ['av', 'mv', 'pv', 'tv'] if v in uvc.valve_normals]
     for v in valves:
         chio.write_dfile(uvc.out_folder + v + '_normal.FE', uvc.valve_normals[v][None])
         print(v, uvc.valve_normals[v][None])
-    # N3 vector
-    n3 = np.cross(uvc.valve_normals['mv'], uvc.valve_normals['av'])
+    # N3 vector - use AV if exists, otherwise MV
+    base_valve = 'av' if uvc.has_av else 'mv'
+    n3 = np.cross(uvc.valve_normals['mv'], uvc.valve_normals[base_valve])
     lv_n3 = n3/np.linalg.norm(n3)
     n3 = np.cross(uvc.valve_normals['tv'], uvc.valve_normals['pv'])
     rv_n3 = n3/np.linalg.norm(n3)

@@ -117,10 +117,78 @@ def create_submesh_bdata(submesh, mesh_bdata, map_mesh_submesh, map_submesh_mesh
         nb = np.unique(mesh_bdata[:,-1])
 
         marker = np.zeros(bfaces.shape[0], dtype=int)
+        
+        # Sort submesh faces once for all comparisons
+        bfaces_sorted = np.sort(bfaces, axis=1)
+        bfaces_set = {tuple(row): i for i, row in enumerate(bfaces_sorted)}
+        
+        # map_submesh_mesh_elems maps: parent mesh element index -> submesh element index (or -1 if not in submesh)
+        # Boundary data format: [element_idx, node0, node1, node2, patch_id]
+        # The first column should be element indices (0-based after read_bfile subtracts 1)
+        max_parent_elem = len(map_submesh_mesh_elems) - 1
+        
         for b in nb:
-            b_ien = map_mesh_submesh[mesh_bdata[mesh_bdata[:,-1]== b, 1:-1]]
-            b_ien = b_ien[np.min(b_ien >= 0, axis=1)]
-            marker[np.sum(np.isin(bfaces, b_ien), axis=1) == 3] = b
+            # Get boundary data for this patch ID
+            patch_bdata = mesh_bdata[mesh_bdata[:,-1]== b]
+            if len(patch_bdata) == 0:
+                continue
+            
+            # Get element indices from first column
+            parent_elem_indices = patch_bdata[:, 0].astype(int)
+            # Get parent face node indices
+            parent_faces = patch_bdata[:, 1:-1]
+            
+            # Filter: only consider faces whose elements are in the submesh
+            # Check if element index is valid and maps to submesh (>= 0)
+            valid_elem_mask = (parent_elem_indices >= 0) & (parent_elem_indices <= max_parent_elem)
+            if np.any(valid_elem_mask):
+                elem_in_submesh = map_submesh_mesh_elems[parent_elem_indices[valid_elem_mask]] >= 0
+                # Combine masks: valid index AND in submesh
+                final_mask = np.zeros(len(parent_elem_indices), dtype=bool)
+                final_mask[valid_elem_mask] = elem_in_submesh
+            else:
+                final_mask = np.zeros(len(parent_elem_indices), dtype=bool)
+            
+            num_valid = np.sum(final_mask)
+            
+            if num_valid == 0:
+                # Debug: check why elements aren't in submesh
+                if b == 3:  # lv_epi patch
+                    print(f"    Debug patch {b}: {len(parent_elem_indices)} faces, 0 elements in submesh")
+                    if len(parent_elem_indices) > 0:
+                        sample_elem = parent_elem_indices[:10]
+                        sample_mappings = [map_submesh_mesh_elems[idx] if 0 <= idx <= max_parent_elem else -999 
+                                          for idx in sample_elem]
+                        print(f"    Debug: sample element indices: {sample_elem}")
+                        print(f"    Debug: sample mappings to submesh: {sample_mappings}")
+                        print(f"    Debug: max_parent_elem: {max_parent_elem}, map_submesh_mesh_elems length: {len(map_submesh_mesh_elems)}")
+                        print(f"    Debug: max element index: {parent_elem_indices.max()}, min: {parent_elem_indices.min()}")
+                continue
+                
+            # Get faces whose elements are in submesh
+            valid_parent_faces = parent_faces[final_mask]
+            
+            # Map parent mesh node indices to submesh node indices
+            b_ien = map_mesh_submesh[valid_parent_faces]
+            # Filter out faces where any node doesn't map (maps to -1)
+            # This can still happen if nodes are shared but element is in submesh
+            valid_mask = np.min(b_ien >= 0, axis=1)
+            b_ien = b_ien[valid_mask]
+            
+            # Match submesh surface faces to parent boundary faces
+            # A face matches if all 3 nodes match (need to check entire face, not just individual nodes)
+            if len(b_ien) > 0:
+                # Sort each face's nodes for comparison (handles different node orderings)
+                b_ien_sorted = np.sort(b_ien, axis=1)
+                
+                # Check each parent face to see if it matches a submesh face
+                for parent_face in b_ien_sorted:
+                    face_tuple = tuple(parent_face)
+                    if face_tuple in bfaces_set:
+                        submesh_idx = bfaces_set[face_tuple]
+                        # Only set marker if not already set (first match wins)
+                        if marker[submesh_idx] == 0:
+                            marker[submesh_idx] = b
 
     bdata = np.hstack([belem[:,None], bfaces, marker[:,None]])
 

@@ -647,7 +647,44 @@ def create_bfile(mesh, cells, corrs = None, inner_faces = False):
             tree2 = KDTree(ctri)
 
             corr = tree2.query_ball_tree(tree1, 1e-5)
-            corr = np.asarray(corr)
+            
+            # Diagnostic prints to understand the structure
+            print(f"\n=== Diagnostic for patch {i+1} ===")
+            print(f"  Number of surface triangles: {len(corr)}")
+            print(f"  Type of corr: {type(corr)}")
+            print(f"  First few elements:")
+            for j in range(min(10, len(corr))):
+                print(f"    corr[{j}]: type={type(corr[j])}, length={len(corr[j]) if hasattr(corr[j], '__len__') else 'N/A'}, value={corr[j]}")
+            
+            # Count distribution of match lengths
+            match_lengths = [len(matches) for matches in corr]
+            unique_lengths, counts = np.unique(match_lengths, return_counts=True)
+            print(f"  Match length distribution:")
+            for length, count in zip(unique_lengths, counts):
+                print(f"    {length} matches: {count} triangles")
+            
+            # Find examples of triangles with multiple matches
+            multi_match_indices = [j for j, matches in enumerate(corr) if len(matches) > 1]
+            if len(multi_match_indices) > 0:
+                print(f"  Found {len(multi_match_indices)} triangles with multiple matches")
+                print(f"  First 5 examples:")
+                for idx in multi_match_indices[:5]:
+                    print(f"    Triangle {idx}: {len(corr[idx])} matches = {corr[idx]}")
+            
+            # Find triangles with no matches
+            no_match_indices = [j for j, matches in enumerate(corr) if len(matches) == 0]
+            if len(no_match_indices) > 0:
+                print(f"  Found {len(no_match_indices)} triangles with no matches")
+            
+            print(f"  Attempting to convert to numpy array...")
+            try:
+                corr = np.asarray(corr)
+                print(f"  Success! Shape: {corr.shape}")
+            except ValueError as e:
+                print(f"  ERROR: {e}")
+                print(f"  This is why we need the patched version!")
+                raise
+            
             corrs.append(corr)
 
         else:

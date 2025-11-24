@@ -28,6 +28,9 @@ class generalUVC:
         self.mesh_folder = out_folder
         self.out_folder = out_folder
 
+        # Check if AV exists in boundary data
+        self.has_av = 'av' in self.patches
+
         # Computing a bunch of needed stuff
         self.get_mesh_size()
         self.get_valve_info()
@@ -61,25 +64,33 @@ class generalUVC:
         l0 = np.linalg.norm(xyz[:,1,:]-xyz[:,0,:], axis=1)
         self.mesh_size = np.mean(l0)
 
+    def get_base_valve(self):
+        """Return 'av' if it exists, otherwise 'mv'."""
+        return 'av' if self.has_av else 'mv'
 
     def get_valve_info(self):
         # Get centroids
         self.valve_centroids = {}
         self.valve_normals = {}
-        for v in ['av', 'mv', 'pv', 'tv']:
+        # Only process valves that exist in patches
+        valves_to_process = [v for v in ['av', 'mv', 'pv', 'tv'] if v in self.patches]
+        for v in valves_to_process:
             nodes = np.unique(self.bv_bdata[self.bv_bdata[:,-1] == self.patches[v], 1:-1])
             centroid = np.mean(self.xyz[nodes], axis=0)
             self.valve_centroids[v] = centroid
 
             if v == 'mv':   # For the mv we need to get rid of the bridge nodes to compute the normal
                 dist_mv = np.linalg.norm(self.xyz[nodes] - self.valve_centroids['mv'], axis=1)
-                dist_av = np.linalg.norm(self.xyz[nodes] - self.valve_centroids['av'], axis=1)
-                dist_vv = np.linalg.norm(self.valve_centroids['mv'] - self.valve_centroids['av'])*1.3
-
-                between_nodes = (dist_av < dist_vv) * (dist_mv < dist_vv)
-                nodes = nodes[~between_nodes]
-                centroid = np.mean(self.xyz[nodes], axis=0)
-                self.mv_aux_centroid = centroid
+                if self.has_av:
+                    dist_av = np.linalg.norm(self.xyz[nodes] - self.valve_centroids['av'], axis=1)
+                    dist_vv = np.linalg.norm(self.valve_centroids['mv'] - self.valve_centroids['av'])*1.3
+                    between_nodes = (dist_av < dist_vv) * (dist_mv < dist_vv)
+                    nodes = nodes[~between_nodes]
+                    centroid = np.mean(self.xyz[nodes], axis=0)
+                    self.mv_aux_centroid = centroid
+                else:
+                    # If no AV, just use MV nodes as-is
+                    self.mv_aux_centroid = centroid
 
             # Fitting a plane to valve nodes
             svd = np.linalg.svd(self.xyz[nodes] - centroid)
@@ -94,8 +105,9 @@ class generalUVC:
         self.lv_centroid = lv_cent
         self.rv_centroid = rv_cent
 
-        if np.dot(self.valve_centroids['av']-lv_cent, self.valve_normals['av']) < 0:
-            self.valve_normals['av'] = -self.valve_normals['av']
+        if self.has_av:
+            if np.dot(self.valve_centroids['av']-lv_cent, self.valve_normals['av']) < 0:
+                self.valve_normals['av'] = -self.valve_normals['av']
         if np.dot(self.valve_centroids['mv']-lv_cent, self.valve_normals['mv']) < 0:
             self.valve_normals['mv'] = -self.valve_normals['mv']
         if np.dot(self.valve_centroids['tv']-rv_cent, self.valve_normals['tv']) < 0:
@@ -191,11 +203,18 @@ class generalUVC:
             lv_epi_nodes = np.unique(self.lv_bdata[self.lv_bdata[:,-1]==self.patches['lv_epi'],1:-1])
         else:
             lv_epi_nodes = np.unique(self.lv_bdata[self.lv_bdata[:,-1]==self.patches['epi'],1:-1])
-        dist = np.linalg.norm(xyz[lv_epi_nodes] - self.xyz[self.bv_sep_epi_apex], axis=1)
+
+        # Epi_apex is the LV epicardial node farthest from the MV centroid
+        mv_nodes = np.unique(self.lv_bdata[self.lv_bdata[:,-1]==self.patches['mv'],1:-1])
+        mv_centroid = np.mean(xyz[mv_nodes], axis=0)
+        dist = np.linalg.norm(xyz[lv_epi_nodes] - mv_centroid[None, :], axis=1)
+        lv_epi_apex = lv_epi_nodes[np.argmax(dist)]
+
+        dist = np.linalg.norm(xyz[lv_epi_nodes] - xyz[lv_epi_apex], axis=1)
         lv_epi_sep_apex = lv_epi_nodes[np.argmin(dist)]
 
         lv_endo_nodes = np.unique(self.lv_bdata[self.lv_bdata[:,-1]==self.patches['lv_endo'],1:-1])
-        dist = np.linalg.norm(xyz[lv_endo_nodes] - xyz[lv_epi_sep_apex], axis=1)
+        dist = np.linalg.norm(xyz[lv_endo_nodes] - xyz[lv_epi_apex], axis=1)
         lv_endo_sep_apex = lv_endo_nodes[np.argmin(dist)]
 
         sep_apex = np.array([lv_endo_sep_apex, lv_epi_sep_apex])
@@ -211,7 +230,7 @@ class generalUVC:
         sep_nodes = np.setdiff1d(sep_nodes, self.lv_interface_nodes)
 
         # I also need the endo node at the septum
-        dist = np.linalg.norm(xyz[sep_nodes] - xyz[self.lv_sep_epi_apex_node], axis=1)
+        dist = np.linalg.norm(xyz[sep_nodes] - xyz[lv_epi_apex], axis=1)
         self.lv_sep_sep_apex_node = sep_nodes[np.argmin(dist)]
 
         self.sep_endo_apex_node = self.map_lv_bv[self.lv_sep_sep_apex_node]
@@ -289,6 +308,38 @@ class generalUVC:
         self.map_results(self.rv_mesh, self.bv_mesh, self.map_bv_rv_elems, coords, data_type='elems')
         self.map_results(self.lv_mesh, self.bv_mesh, self.map_bv_lv_elems, coords, data_type='elems')
 
+    def merge_rv_lat_to_bv(self):
+        """
+        Merge rv_lat coordinate from RV mesh to biventricular mesh.
+        Also merges rv_lat_tv and rv_lat_pv unblended angles.
+        LV region is set to 0.
+        """
+        if 'rv_lat' not in self.rv_mesh.point_data:
+            raise ValueError("rv_lat not found in rv_mesh.point_data")
+        
+        # Initialize rv_lat in bv_mesh with zeros
+        rv_lat_bv = np.zeros(self.bv_mesh.points.shape[0])
+        
+        # Map RV values to bv_mesh
+        rv_lat_bv[self.map_rv_bv] = self.rv_mesh.point_data['rv_lat']
+        
+        # LV region remains 0 (already initialized)
+        # No need to explicitly set LV to 0 since it's already zero
+        
+        # Store in bv_mesh
+        self.bv_mesh.point_data['rv_lat'] = rv_lat_bv
+        
+        # Also merge unblended angles if they exist
+        if 'rv_lat_tv' in self.rv_mesh.point_data:
+            rv_lat_tv_bv = np.zeros(self.bv_mesh.points.shape[0])
+            rv_lat_tv_bv[self.map_rv_bv] = self.rv_mesh.point_data['rv_lat_tv']
+            self.bv_mesh.point_data['rv_lat_tv'] = rv_lat_tv_bv
+        
+        if 'rv_lat_pv' in self.rv_mesh.point_data:
+            rv_lat_pv_bv = np.zeros(self.bv_mesh.points.shape[0])
+            rv_lat_pv_bv[self.map_rv_bv] = self.rv_mesh.point_data['rv_lat_pv']
+            self.bv_mesh.point_data['rv_lat_pv'] = rv_lat_pv_bv
+
 
 
     def compute_cartesion_apex_distance(self):
@@ -317,9 +368,11 @@ class generalUVC:
         self.lv_endo_apex_node = lv_endo_nodes[np.argmax(np.abs(dist))]
 
         # Rescale long to be 0 at lv_endo_apex_node
-        av_node = np.where(long==1)[0][0]
+        # Use base valve (AV if exists, else MV) to find node where long==1
+        base_valve = self.get_base_valve()
+        base_valve_node = np.where(long==1)[0][0]
         long = long - long[self.lv_endo_apex_node]
-        long = long/long[av_node]
+        long = long/long[base_valve_node]
 
         if aha_type == 'points':
             xyz_aha = self.lv_mesh.points
@@ -406,16 +459,21 @@ class fastUVC(generalUVC):
         xyz = self.xyz
 
         # To define cut plane, select lower node of the AV or MV
-        av_nodes = np.unique(self.bv_bdata[self.bv_bdata[:,-1] == self.patches['av'], 1:-1])
         mv_nodes = np.unique(self.bv_bdata[self.bv_bdata[:,-1] == self.patches['mv'], 1:-1])
         dist = self.long_axis_vector@(xyz - xyz[self.bv_sep_epi_apex]).T
-        av_low = np.min(dist[av_nodes])
         mv_low = np.min(dist[mv_nodes])
-        valve_min = [av_low, mv_low]
-        which = np.argmin(valve_min)
-        if which == 0:
-            cut_node = av_nodes[np.argmin(dist[av_nodes])]
-        elif which == 1:
+        
+        if self.has_av:
+            av_nodes = np.unique(self.bv_bdata[self.bv_bdata[:,-1] == self.patches['av'], 1:-1])
+            av_low = np.min(dist[av_nodes])
+            valve_min = [av_low, mv_low]
+            which = np.argmin(valve_min)
+            if which == 0:
+                cut_node = av_nodes[np.argmin(dist[av_nodes])]
+            else:
+                cut_node = mv_nodes[np.argmin(dist[mv_nodes])]
+        else:
+            # If no AV, use MV
             cut_node = mv_nodes[np.argmin(dist[mv_nodes])]
 
         # Long plane coord
@@ -449,6 +507,19 @@ class fastUVC(generalUVC):
         self.rv_mesh, self.map_bv_rv, self.map_rv_bv = create_submesh(self.bv_mesh, self.map_bv_rv_elems)
         self.rv_bdata = create_submesh_bdata(self.rv_mesh, self.bv_bdata, self.map_bv_rv, self.map_rv_bv_elems, 'parent')
         self.rv_bdata_og = np.copy(self.rv_bdata)
+
+        # Preserve GlobalNodeID and GlobalElementID from bv_mesh to submeshes
+        if 'GlobalNodeID' in self.bv_mesh.point_data:
+            # Map GlobalNodeID to LV submesh
+            self.lv_mesh.point_data['GlobalNodeID'] = self.bv_mesh.point_data['GlobalNodeID'][self.map_lv_bv]
+            # Map GlobalNodeID to RV submesh
+            self.rv_mesh.point_data['GlobalNodeID'] = self.bv_mesh.point_data['GlobalNodeID'][self.map_rv_bv]
+        
+        if 'GlobalElementID' in self.bv_mesh.cell_data:
+            # Map GlobalElementID to LV submesh
+            self.lv_mesh.cell_data['GlobalElementID'] = [self.bv_mesh.cell_data['GlobalElementID'][0][self.map_bv_lv_elems]]
+            # Map GlobalElementID to RV submesh
+            self.rv_mesh.cell_data['GlobalElementID'] = [self.bv_mesh.cell_data['GlobalElementID'][0][self.map_bv_rv_elems]]
 
         # In the bv bfile, rv-lv interface faces are only assigned to one of the meshes..
         # Therefore, we need to transfer that info to the other mesh.
@@ -515,6 +586,7 @@ class UVC(generalUVC):
             marker = self.bv_bdata[:,-1] == self.patches['epi']
 
         if self.split_epi:
+            print("split_epi is True")
             epi_nodes = np.where(self.bv_mesh.point_data['septum'] == 0.5)[0]
         else:
             epi_nodes = np.unique(self.bv_bdata[marker, 1:-1])
@@ -530,16 +602,21 @@ class UVC(generalUVC):
         self.bv_sep_epi_apex = epi_nodes[np.argmin(weight_norm)]
 
         # To define cut plane, select lower node of the AV or MV
-        av_nodes = np.unique(self.bv_bdata[self.bv_bdata[:,-1] == self.patches['av'], 1:-1])
         mv_nodes = np.unique(self.bv_bdata[self.bv_bdata[:,-1] == self.patches['mv'], 1:-1])
         dist = self.long_axis_vector@(xyz - xyz[self.bv_sep_epi_apex]).T
-        av_low = np.min(dist[av_nodes])
         mv_low = np.min(dist[mv_nodes])
-        valve_min = [av_low, mv_low]
-        which = np.argmin(valve_min)
-        if which == 0:
-            cut_node = av_nodes[np.argmin(dist[av_nodes])]
-        elif which == 1:
+        
+        if self.has_av:
+            av_nodes = np.unique(self.bv_bdata[self.bv_bdata[:,-1] == self.patches['av'], 1:-1])
+            av_low = np.min(dist[av_nodes])
+            valve_min = [av_low, mv_low]
+            which = np.argmin(valve_min)
+            if which == 0:
+                cut_node = av_nodes[np.argmin(dist[av_nodes])]
+            else:
+                cut_node = mv_nodes[np.argmin(dist[mv_nodes])]
+        else:
+            # If no AV, use MV
             cut_node = mv_nodes[np.argmin(dist[mv_nodes])]
         self.bv_base_cut_node = cut_node
 
@@ -741,6 +818,42 @@ class UVC(generalUVC):
 
         self.rv_mesh, self.map_bv_rv, self.map_rv_bv = create_submesh(self.bv_mesh, self.map_bv_rv_elems)
         self.rv_bdata = create_submesh_bdata(self.rv_mesh, self.bv_bdata, self.map_bv_rv, self.map_rv_bv_elems, 'boundary')
+        
+        # Preserve GlobalNodeID and GlobalElementID from bv_mesh to submeshes
+        if 'GlobalNodeID' in self.bv_mesh.point_data:
+            # Map GlobalNodeID to LV submesh
+            self.lv_mesh.point_data['GlobalNodeID'] = self.bv_mesh.point_data['GlobalNodeID'][self.map_lv_bv]
+            # Map GlobalNodeID to RV submesh
+            self.rv_mesh.point_data['GlobalNodeID'] = self.bv_mesh.point_data['GlobalNodeID'][self.map_rv_bv]
+        
+        if 'GlobalElementID' in self.bv_mesh.cell_data:
+            # Map GlobalElementID to LV submesh
+            self.lv_mesh.cell_data['GlobalElementID'] = [self.bv_mesh.cell_data['GlobalElementID'][0][self.map_bv_lv_elems]]
+            # Map GlobalElementID to RV submesh
+            self.rv_mesh.cell_data['GlobalElementID'] = [self.bv_mesh.cell_data['GlobalElementID'][0][self.map_bv_rv_elems]]
+        
+        # Debug: Check boundary data patch IDs
+        if self.split_epi:
+            bv_patches = np.unique(self.bv_bdata[:,-1])
+            lv_patches = np.unique(self.lv_bdata[:,-1])
+            rv_patches = np.unique(self.rv_bdata[:,-1])
+            print(f"  Debug: BV boundary patches: {bv_patches}")
+            print(f"  Debug: LV boundary patches: {lv_patches} (total {len(self.lv_bdata)} faces)")
+            print(f"  Debug: RV boundary patches: {rv_patches} (total {len(self.rv_bdata)} faces)")
+            if 'lv_epi' in self.patches:
+                expected_lv_epi = self.patches['lv_epi']
+                lv_epi_count = np.sum(self.lv_bdata[:,-1] == expected_lv_epi)
+                print(f"  Debug: LV epi patch ID {expected_lv_epi} found in {lv_epi_count} LV boundary faces")
+                bv_lv_epi_count = np.sum(self.bv_bdata[:,-1] == expected_lv_epi)
+                print(f"  Debug: LV epi patch ID {expected_lv_epi} found in {bv_lv_epi_count} BV boundary faces")
+                if expected_lv_epi not in lv_patches:
+                    # Check how many LV mesh nodes are in the BV lv_epi faces
+                    bv_lv_epi_faces = self.bv_bdata[self.bv_bdata[:,-1] == expected_lv_epi, 1:-1]
+                    bv_lv_epi_nodes = np.unique(bv_lv_epi_faces.flatten())
+                    lv_mesh_nodes = set(range(len(self.lv_mesh.points)))
+                    bv_lv_epi_nodes_in_lv = [n for n in bv_lv_epi_nodes if self.map_bv_lv[n] >= 0]
+                    print(f"  Debug: BV lv_epi has {len(bv_lv_epi_nodes)} unique nodes, {len(bv_lv_epi_nodes_in_lv)} map to LV mesh")
+                    print(f"  Debug: LV mesh has {len(self.lv_mesh.points)} points")
 
         lv_0elems = np.where(self.lv_bdata[:,-1]==0)[0]
         lv_bndry0_elems = self.lv_bdata[lv_0elems,1:-1]
@@ -862,9 +975,60 @@ class UVC(generalUVC):
         vector = xyz[self.sep_endo_base_nodes[1]] - xyz[self.lv_sep_endo_apex_node]
         self.rvlv_post_vector = vector/np.linalg.norm(vector)
 
-
-
     def create_lv_circ_bc1(self):
+        xyz = self.lv_mesh.points
+
+        # Choose the LV interface node with the smallest longitudinal value
+        if 'long' not in self.lv_mesh.point_data:
+            raise ValueError("LV mesh is missing 'long' field required for circumferential BCs.")
+        long_lv = self.lv_mesh.point_data['long']
+        interface_nodes = self.lv_interface_nodes
+        if interface_nodes is None or len(interface_nodes) == 0:
+            raise ValueError("lv_interface_nodes is empty; cannot define circumferential BCs.")
+        farthest_node_from_mv = interface_nodes[np.argmin(long_lv[interface_nodes])]
+
+        nodes = self.lv_interface_nodes
+        apex_distance1 = np.linalg.norm(xyz[nodes] - xyz[self.lv_sep_sep_apex_node], axis=1)
+        apex_distance2 = np.linalg.norm(xyz[nodes] - xyz[farthest_node_from_mv], axis=1)
+        nodes = nodes[(apex_distance1>self.mesh_size*3)*(apex_distance2>self.mesh_size*3)]
+
+        interface_xyz = xyz[nodes]
+        septum_center = np.mean(interface_xyz, axis=0)
+
+        # Vector that splits septum in two
+        vector = septum_center - xyz[farthest_node_from_mv]
+        vlength = np.linalg.norm(vector)
+        vector = vector/vlength
+        third_vector = np.cross(vector, self.septum_vector)
+        third_vector = third_vector/np.linalg.norm(third_vector)
+        septum_center = septum_center - vector*vlength*0.5
+        self.septum_mid_point = septum_center
+
+        # Finding septum endo nodes to define circ coordinates.
+        vector = xyz[self.sep_endo_base_nodes[0]] - septum_center
+        self.rvlv_ant_vector = vector/np.linalg.norm(vector)
+
+        vector = xyz[self.sep_endo_base_nodes[1]] - septum_center
+        self.rvlv_post_vector = vector/np.linalg.norm(vector)
+
+        dist_third = third_vector@(interface_xyz - xyz[self.lv_sep_sep_apex_node]).T
+        ant_nodes = nodes[dist_third > 0]
+        post_nodes = nodes[dist_third < 0]
+
+        self.rvlv_normal_ant = np.cross(self.rvlv_ant_vector, self.septum_vector)       # point outwards
+        self.lv_bc1_marker_ant = ant_nodes[self.rvlv_normal_ant@(xyz[ant_nodes] - septum_center).T >= 0]
+
+        self.rvlv_normal_post = -np.cross(self.rvlv_post_vector, self.septum_vector)
+        self.lv_bc1_marker_post = post_nodes[self.rvlv_normal_post@(xyz[post_nodes] - septum_center).T >= 0]
+
+        marker = np.append(self.lv_bc1_marker_ant, self.lv_bc1_marker_post)
+        vals = np.append(np.ones(len(self.lv_bc1_marker_ant)), -np.ones(len(self.lv_bc1_marker_post)))
+
+        arr = np.zeros(self.lv_mesh.points.shape[0])
+        arr[marker] = vals.flatten()
+        self.lv_mesh.point_data['bc1'] = arr
+
+    def create_lv_circ_bc1_old(self):
         xyz = self.lv_mesh.points
 
         nodes = self.lv_interface_nodes
@@ -940,15 +1104,20 @@ class UVC(generalUVC):
 
         # Find bridge nodes
         midpoints = np.mean(xyz[ien], axis=1)
-        vec_valves = np.linalg.norm(self.valve_centroids['av'] - self.valve_centroids['mv'])
-        vec_mv = np.linalg.norm(xyz[div_nodes] - self.valve_centroids['mv'], axis=1)
-        vec_av = np.linalg.norm(xyz[div_nodes] - self.valve_centroids['av'], axis=1)
-        bridge_nodes = (vec_mv < vec_valves)*(vec_av < vec_valves)
-        bridge_nodes = div_nodes[bridge_nodes]
-        vec_mv = np.linalg.norm(midpoints[div_elems] - self.valve_centroids['mv'], axis=1)
-        vec_av = np.linalg.norm(midpoints[div_elems] - self.valve_centroids['av'], axis=1)
-        bridge_elems = (vec_mv < vec_valves)*(vec_av < vec_valves)
-        self.bridge_elems_bc = div_elems[bridge_elems]
+        if self.has_av:
+            vec_valves = np.linalg.norm(self.valve_centroids['av'] - self.valve_centroids['mv'])
+            vec_mv = np.linalg.norm(xyz[div_nodes] - self.valve_centroids['mv'], axis=1)
+            vec_av = np.linalg.norm(xyz[div_nodes] - self.valve_centroids['av'], axis=1)
+            bridge_nodes = (vec_mv < vec_valves)*(vec_av < vec_valves)
+            bridge_nodes = div_nodes[bridge_nodes]
+            vec_mv = np.linalg.norm(midpoints[div_elems] - self.valve_centroids['mv'], axis=1)
+            vec_av = np.linalg.norm(midpoints[div_elems] - self.valve_centroids['av'], axis=1)
+            bridge_elems = (vec_mv < vec_valves)*(vec_av < vec_valves)
+            self.bridge_elems_bc = div_elems[bridge_elems]
+        else:
+            # If no AV, skip bridge node detection (no bridge between AV and MV)
+            bridge_nodes = np.array([], dtype=int)
+            self.bridge_elems_bc = np.array([], dtype=int)
 
         # Correcting lat and sep
         lat_nodes = np.setdiff1d(lat_nodes, bridge_nodes)
